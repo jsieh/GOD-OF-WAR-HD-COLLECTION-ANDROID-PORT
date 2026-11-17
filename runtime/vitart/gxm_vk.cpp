@@ -99,6 +99,31 @@ Stats g_stats;
 // coordenadas normalizadas e não mudam.
 // Sem VITART_VK_SCALE, a escala acompanha o monitor: a altura nativa do GoW (408) vezes a escala cobre a
 // altura da tela (1080p -> 3, 1440p -> 4), e a apresentação reduz com filtro (supersampling).
+//
+// Códigos de escala (os mesmos do `resolution=` do ini e de set_render_scale):
+//   1..8        multiplicador inteiro da resolução do guest (1 = 720x408 nos alvos de tela)
+//   144..1632   altura interna em pixels (240 = 240p, 360 = 360p...): escala = código / 408, uma fração. Abaixo do
+//               nativo serve para GPU fraca (PowerVR GE8320 do Helio P35...).
+constexpr uint32_t kAlturaGuest = 408;
+constexpr uint32_t kAlturaMin = 144, kAlturaMax = 1632;
+uint32_t escala_valida(int v) {
+    if (v >= (int)kAlturaMin) return (uint32_t)(v > (int)kAlturaMax ? kAlturaMax : v);
+    return (uint32_t)(v < 1 ? 1 : v > 8 ? 8 : v);
+}
+struct Fracao {
+    uint32_t num, den;
+};
+Fracao fracao_de(uint32_t s) { return s >= kAlturaMin ? Fracao{s, kAlturaGuest} : Fracao{s ? s : 1u, 1u}; }
+float escala_f(uint32_t s) {
+    const Fracao f = fracao_de(s);
+    return (float)f.num / (float)f.den;
+}
+// dimensão do guest (pixels) na escala s, arredondada para o pixel mais próximo (inteira: g * s, como antes)
+uint32_t dim_host(uint32_t g, uint32_t s) {
+    const Fracao f = fracao_de(s);
+    const uint32_t v = (uint32_t)(((uint64_t)g * f.num + f.den / 2) / f.den);
+    return v ? v : 1;
+}
 uint32_t g_scale_override = 0; // escolhida no menu do jogo (set_render_scale)
 uint32_t scale_auto() {
     static const uint32_t s = [] {
@@ -113,7 +138,7 @@ uint32_t scale_auto() {
             v = 2; // celular: 1440x816 já é bastante pra GPU e pra bateria (o menu de opções sobe)
 #endif
         }
-        return (uint32_t)(v < 1 ? 1 : v > 8 ? 8 : v);
+        return escala_valida(v);
     }();
     return s;
 }
@@ -124,8 +149,9 @@ uint32_t scale_now() { return g_scale_override ? g_scale_override : scale_auto()
 float g_widen = 1.f;
 bool alvo_de_tela(uint32_t gw, uint32_t gh) { return gh && gw * 100 >= gh * 170 && gw * 100 <= gh * 182; }
 uint32_t host_w(uint32_t gw, uint32_t gh, uint32_t s, float widen) {
-    return alvo_de_tela(gw, gh) && widen != 1.f ? ((uint32_t)(gw * s * widen + 1.f) & ~1u) : gw * s;
+    return alvo_de_tela(gw, gh) && widen != 1.f ? ((uint32_t)(gw * escala_f(s) * widen + 1.f) & ~1u) : dim_host(gw, s);
 }
+uint32_t host_h(uint32_t gh, uint32_t s) { return dim_host(gh, s); }
 float g_aniso = 1.f;                         // anisotropia máxima dos samplers (1 = desligada)
 VkPipelineCache g_pcache = VK_NULL_HANDLE;   // persistido em vk_pipeline_cache.bin
 bool g_pcache_dirty = false;
@@ -592,7 +618,7 @@ bool get_target(uint32_t addr, uint32_t w, uint32_t h, Target *&out) {
     }
     Target t;
     t.gw = w, t.gh = h;
-    w = host_w(w, h, scale_now(), g_widen), h *= scale_now();
+    w = host_w(w, h, scale_now(), g_widen), h = host_h(h, scale_now());
     if (!make_image(t.color, w, h, kColor,
                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT))
@@ -2275,7 +2301,7 @@ void run_post(Target &t) {
     }
     PostPush pp{};
     std::memcpy(pp.s2v, g_post_s2v, sizeof pp.s2v);
-    const float hw = (float)((w + 1) / 2), hh = (float)((h + 1) / 2), rs = (float)scale_now();
+    const float hw = (float)((w + 1) / 2), hh = (float)((h + 1) / 2), rs = escala_f(scale_now());
     auto set4 = [&](int i, float a, float b, float c2, float d) { pp.p[i][0] = a, pp.p[i][1] = b, pp.p[i][2] = c2, pp.p[i][3] = d; };
     set4(0, focal, cfg.ssao_radius, focal > 0 ? cfg.ssao : 0.f, cfg.bloom_threshold);
     set4(1, cfg.bloom, cfg.exposure, cfg.tonemap, cfg.saturation);
@@ -2651,9 +2677,10 @@ bool draw(const Draw &d) {
     // vaza 1 px além dos personagens (o contorno escuro). Medido no replay: +0,5 deixa nítido e sem halo.
     static const float halfpix = getenv("VITART_VK_HALFPIX") ? (float)std::atof(getenv("VITART_VK_HALFPIX")) : 0.5f;
     // escala do guest para o host, por eixo: no ultrawide o alvo de tela é mais largo que a escala
-    const float rs = (float)scale_now();
+    const float rs = escala_f(scale_now());
     const float rsx = tgt->gw ? (float)tgt->color.w / (float)tgt->gw : rs;
-    vp.x = (vp.x + halfpix) * rsx, vp.y = (vp.y + halfpix) * rs, vp.width *= rsx, vp.height *= rs;
+    const float rsy = tgt->gh ? (float)tgt->color.h / (float)tgt->gh : rs; // fração: o alvo é arredondado em y também
+    vp.x = (vp.x + halfpix) * rsx, vp.y = (vp.y + halfpix) * rsy, vp.width *= rsx, vp.height *= rsy;
     vp.minDepth = vp.minDepth < 0 ? 0 : (vp.minDepth > 1 ? 1 : vp.minDepth);
     vp.maxDepth = vp.maxDepth < 0 ? 0 : (vp.maxDepth > 1 ? 1 : vp.maxDepth);
     vkCmdSetViewport(g_cmd, 0, 1, &vp);
@@ -2756,7 +2783,7 @@ uint32_t auto_render_scale() { return scale_auto(); }
 bool refazer_alvos(uint32_t s, float widen);
 bool set_render_scale(uint32_t s) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
-    s = s < 1 ? 1 : s > 8 ? 8 : s;
+    s = escala_valida((int)s);
     if (s == scale_now()) return true;
     if (!g_dev || g_targets.empty()) {
         g_scale_override = s;
@@ -2788,7 +2815,7 @@ bool refazer_alvos(uint32_t s, float widen) {
     std::vector<VkFramebuffer> old_fb;
     for (auto &kv : g_targets) {
         Target &t = kv.second;
-        const uint32_t w = t.gw ? host_w(t.gw, t.gh, s, widen) : t.color.w, h = t.gh ? t.gh * s : t.color.h;
+        const uint32_t w = t.gw ? host_w(t.gw, t.gh, s, widen) : t.color.w, h = t.gh ? host_h(t.gh, s) : t.color.h;
         Target n;
         if (!make_image(n.color, w, h, kColor,
                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |

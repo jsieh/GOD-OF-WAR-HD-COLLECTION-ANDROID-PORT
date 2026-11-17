@@ -95,7 +95,7 @@ uint32_t scale_auto() {
             v = (mh + 407) / 408;
             v = v < 2 ? 2 : v > 4 ? 4 : v;
         }
-        return (uint32_t)(v < 1 ? 1 : v > 8 ? 8 : v);
+        return (uint32_t)(v >= 144 ? 1 : v < 1 ? 1 : v > 8 ? 8 : v); // >= 144 = altura (só no Vulkan): aqui 1x
     }();
     return s;
 }
@@ -1115,7 +1115,7 @@ bool refazer_alvos(uint32_t s, float widen) {
 }
 bool set_render_scale(uint32_t s) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
-    s = s < 1 ? 1 : s > 8 ? 8 : s;
+    s = s >= 144 ? 1 : s < 1 ? 1 : s > 8 ? 8 : s; // >= 144 = altura em pixels (escala fracionária só no Vulkan): aqui 1x
     if (s == scale_now()) return true;
     if (g_dev && !g_targets.empty() && !refazer_alvos(s, g_widen)) return false;
     g_scale_override = s;

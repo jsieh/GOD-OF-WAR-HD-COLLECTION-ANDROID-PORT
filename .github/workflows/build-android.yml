@@ -1,0 +1,50 @@
+name: Build libvitart.so (arm64)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      NDK_ZIP: android-ndk-r29-linux.zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache do NDK
+        id: ndk-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/ndk
+          key: android-ndk-r29-linux
+
+      - name: Baixar o NDK r29
+        if: steps.ndk-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/ndk
+          curl -fL --retry 3 -o "/tmp/$NDK_ZIP" "https://dl.google.com/android/repository/$NDK_ZIP"
+          unzip -q "/tmp/$NDK_ZIP" -d ~/ndk
+          ls ~/ndk
+
+      - name: Ajustar o script para Linux (ndk-build.cmd só existe no Windows)
+        run: sed -i 's#ndk-build\.cmd#ndk-build#' scripts/build-android-runtime.sh
+
+      - name: Compilar o runtime
+        run: |
+          export ANDROID_NDK="$HOME/ndk/android-ndk-r29"
+          [ -d "$ANDROID_NDK" ] || { echo "NDK não encontrado em $ANDROID_NDK"; ls ~/ndk; exit 1; }
+          JOBS="$(nproc)" bash scripts/build-android-runtime.sh
+          OUT=build/lib/libvitart.so
+          [ -s "$OUT" ] || { echo "libvitart.so não foi gerado"; exit 1; }
+          [ "$(od -An -tx1 -j18 -N2 "$OUT" | tr -d ' \n')" = "b700" ] || { echo "libvitart.so não é aarch64"; exit 1; }
+          ls -l "$OUT"
+
+      - name: Guardar o libvitart.so
+        uses: actions/upload-artifact@v4
+        with:
+          name: libvitart-arm64
+          path: build/lib/libvitart.so
+          if-no-files-found: error

@@ -43,5 +43,25 @@ final class Opcoes {
         }
     }
 
+    // Aparelho fraco (PowerVR que não é Xclipse: Helio P35/P22, Unisoc...): na primeira abertura grava um perfil leve no
+    // ini (resolução interna 240p, sem o pack de texturas HD, 30 FPS) e marca perfil_leve=1 para não repetir: depois o
+    // jogador muda no ini (resolution=360 sobe para 360p, resolution=1 volta à resolução do guest, 720x408) ou no menu.
+    // Só troca a resolução se ela ainda é a do instalador (vazia, 0 ou 1).
+    static void perfilLeve(android.content.Context c, File raiz) {
+        try {
+            if (!ler(raiz, "perfil_leve", "").isEmpty()) return;
+            GpuInfo g = GpuInfo.detectar(c);
+            if (g.familia != GpuInfo.Familia.POWERVR || g.xclipse()) return;
+            String res = ler(raiz, "resolution", "");
+            if (res.isEmpty() || res.equals("0") || res.equals("1")) gravar(raiz, "resolution", "240");
+            gravar(raiz, "hd_textures", "0");
+            gravar(raiz, "fps", "30");
+            gravar(raiz, "perfil_leve", "1");
+            android.util.Log.i("vitart", "perfil leve (" + g.nome + "): 240p, sem texturas HD, 30 FPS");
+        } catch (Exception ignorada) {
+            // GPU não detectada: fica o padrão
+        }
+    }
+
     private Opcoes() {}
 }

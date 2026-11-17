@@ -145,6 +145,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         // o language= do ini manda no jogo (e nos menus do vitart, que vêm da tradução): segue o do lançador a cada
         // abertura, senão trocar o idioma do Android ou do lançador deixava o jogo no idioma da instalação
         Opcoes.gravar(raiz, "language", Idioma.traducao(Idioma.atual(this)));
+        Opcoes.perfilLeve(this, raiz); // aparelho fraco (PowerVR): 240p, sem texturas HD, 30 FPS na primeira abertura
         nativeSetenv("VITART_SPV_DIR", new File(raiz, "shaders").getPath());
         limitesDoPack(); // antes do vitart_env.txt: ele pode mudar
         // diagnóstico: <pasta>/vitart_env.txt com CHAVE=valor por linha (as variáveis VITART_* do PC)

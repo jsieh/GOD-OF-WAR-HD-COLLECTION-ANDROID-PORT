@@ -60,8 +60,14 @@ uint32_t g_qfam = 0;
 VkCommandPool g_pool = VK_NULL_HANDLE;
 VkCommandBuffer g_cmd = VK_NULL_HANDLE;
 VkCommandBuffer g_cur = VK_NULL_HANDLE;  // onde barrier() grava (g_cmd, ou g_pcmd durante a apresentação)
-VkCommandBuffer g_pcmd = VK_NULL_HANDLE; // apresentação: buffer e fence próprios, sem esperar a GPU
-VkFence g_pfence = VK_NULL_HANDLE;
+// Dois buffers de apresentação permitem gravar o próximo blit enquanto a GPU termina o anterior.
+// Cada buffer só é reutilizado depois que sua própria fence sinaliza.
+constexpr uint32_t kPresentSlots = 2;
+VkCommandBuffer g_pcmds[kPresentSlots] = {};
+VkFence g_pfences[kPresentSlots] = {};
+uint32_t g_pi = 0;
+VkCommandBuffer g_pcmd = VK_NULL_HANDLE; // alias da vaga de apresentação atual
+VkFence g_pfence = VK_NULL_HANDLE;      // fence da vaga de apresentação atual
 VkFence g_fence = VK_NULL_HANDLE;
 VkPhysicalDeviceMemoryProperties g_memprops{};
 VkRenderPass g_rp = VK_NULL_HANDLE;
@@ -164,19 +170,10 @@ uint64_t now_ns() {
 #endif
     return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
-// Timing every upload/draw adds clock reads to the CPU hot path. Enable detailed CPU
-// timers only when explicitly profiling; GPU timestamp queries remain independent.
-const bool g_vk_cpu_profile = std::getenv("VITART_VK_PROFILE") != nullptr;
 struct Timer {
-    uint64_t &acc;
-    uint64_t t0 = 0;
-    bool active = false;
-    explicit Timer(uint64_t &a) : acc(a), active(g_vk_cpu_profile) {
-        if (active) t0 = now_ns();
-    }
-    ~Timer() {
-        if (active) acc += now_ns() - t0;
-    }
+    uint64_t &acc, t0 = now_ns();
+    explicit Timer(uint64_t &a) : acc(a) {}
+    ~Timer() { acc += now_ns() - t0; }
 };
 
 constexpr const char *kPcacheFile = "vk_pipeline_cache.bin";
@@ -465,10 +462,40 @@ void select_slot(uint32_t i) {
     g_ring_base = (VkDeviceSize)i * kRingHalf;
 }
 
-// Espera as duas vagas (leitura de alvo, depuração, encerramento).
+// Espera todas as vagas pendentes em uma única chamada Vulkan. Isso evita
+// fazer uma chamada vkWaitForFences separada para cada slot durante flushes
+// síncronos (encerramento, redimensionamento e operações que exigem idle).
+// Os timestamps e os estados de cada slot continuam sendo consumidos
+// individualmente depois que todas as fences sinalizam.
 bool frame_wait() {
-    for (uint32_t i = 0; i < kSlots; i++)
-        if (!slot_wait(i)) return false;
+    VkFence pending[kSlots] = {};
+    uint32_t indices[kSlots] = {};
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < kSlots; ++i) {
+        if (g_pend[i]) {
+            pending[count] = g_fences[i];
+            indices[count] = i;
+            ++count;
+        }
+    }
+
+    if (count) {
+        Timer tm(g_stats.wait_ns);
+        VKC(vkWaitForFences(g_dev, count, pending, VK_TRUE, UINT64_MAX));
+    }
+
+    for (uint32_t n = 0; n < count; ++n) {
+        const uint32_t i = indices[n];
+        if (g_tsopen[i]) {
+            uint64_t ts[2] = {};
+            if (vkGetQueryPoolResults(g_dev, g_qpool, 2 * i, 2, sizeof ts, ts, 8,
+                                      VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && ts[1] > ts[0])
+                g_stats.gpu_ns += (uint64_t)((ts[1] - ts[0]) * g_ts_period);
+            g_tsopen[i] = false;
+        }
+        g_pend[i] = false;
+    }
+
     for (auto &im : g_transient) destroy(im);
     g_transient.clear();
     return true;
@@ -1634,9 +1661,15 @@ bool present(uint32_t addr) {
         return true;
     }
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return fail("vkAcquireNextImageKHR", r);
+    // Reutiliza a vaga de apresentação em rotação. Em vez de esperar a fence do quadro
+    // imediatamente anterior a cada present, só espera quando voltamos à mesma vaga.
+    // A fence protege o command buffer contra reset enquanto ele ainda está em execução.
+    g_pi = (g_pi + 1) % kPresentSlots;
+    g_pcmd = g_pcmds[g_pi];
+    g_pfence = g_pfences[g_pi];
     {
         Timer tm(g_stats.pfence_ns);
-        VKC(vkWaitForFences(g_dev, 1, &g_pfence, VK_TRUE, UINT64_MAX)); // apresentação anterior concluída
+        VKC(vkWaitForFences(g_dev, 1, &g_pfence, VK_TRUE, UINT64_MAX));
     }
     VKC(vkResetCommandBuffer(g_pcmd, 0));
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1868,7 +1901,10 @@ bool init(bool validation, bool window) {
                  kDepth == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8", *carga ? "; " : "", carga);
     }
     VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-    pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    // These command buffers are short-lived and are reset/re-recorded every frame.
+    // TRANSIENT is a driver hint; keep individual command-buffer reset support because
+    // the frame and upload buffers are recycled independently.
+    pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT | VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
     pci.queueFamilyIndex = g_qfam;
     VKC(vkCreateCommandPool(g_dev, &pci, nullptr, &g_pool));
     VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -1877,13 +1913,17 @@ bool init(bool validation, bool window) {
     cai.commandBufferCount = 1;
     for (auto &cb : g_cmds) VKC(vkAllocateCommandBuffers(g_dev, &cai, &cb));
     for (auto &cb : g_upcmds) VKC(vkAllocateCommandBuffers(g_dev, &cai, &cb));
-    VKC(vkAllocateCommandBuffers(g_dev, &cai, &g_pcmd));
+    cai.commandBufferCount = kPresentSlots;
+    VKC(vkAllocateCommandBuffers(g_dev, &cai, g_pcmds));
     g_cur = g_cmd;
     VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     for (auto &f : g_fences) VKC(vkCreateFence(g_dev, &fci, nullptr, &f));
     VkFenceCreateInfo pfci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     pfci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    VKC(vkCreateFence(g_dev, &pfci, nullptr, &g_pfence));
+    for (auto &f : g_pfences) VKC(vkCreateFence(g_dev, &pfci, nullptr, &f));
+    g_pi = 0;
+    g_pcmd = g_pcmds[g_pi];
+    g_pfence = g_pfences[g_pi];
     {
         VkPhysicalDeviceProperties pp;
         vkGetPhysicalDeviceProperties(g_phys, &pp);
@@ -2911,7 +2951,7 @@ void shutdown() {
     for (auto l : g_dsl) vkDestroyDescriptorSetLayout(g_dev, l, nullptr);
     vkDestroyRenderPass(g_dev, g_rp, nullptr);
     for (auto f : g_fences) vkDestroyFence(g_dev, f, nullptr);
-    vkDestroyFence(g_dev, g_pfence, nullptr);
+    for (auto f : g_pfences) vkDestroyFence(g_dev, f, nullptr);
     if (g_qpool) vkDestroyQueryPool(g_dev, g_qpool, nullptr);
     vkDestroyCommandPool(g_dev, g_pool, nullptr);
     vkDestroyDevice(g_dev, nullptr);

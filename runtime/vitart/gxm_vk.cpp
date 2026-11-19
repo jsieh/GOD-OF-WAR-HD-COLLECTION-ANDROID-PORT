@@ -619,6 +619,10 @@ bool get_target(uint32_t addr, uint32_t w, uint32_t h, Target *&out) {
     Target t;
     t.gw = w, t.gh = h;
     w = host_w(w, h, scale_now(), g_widen), h = host_h(h, scale_now());
+    {
+        static int diag = 0; // diagnóstico da escala: o tamanho que a GPU realmente recebe (só os primeiros alvos)
+        if (diag < 40) ++diag, vt::logf("vitart: alvo %08x guest %ux%u -> host %ux%u (escala %u)", addr, t.gw, t.gh, w, h, scale_now());
+    }
     if (!make_image(t.color, w, h, kColor,
                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT))
@@ -2784,13 +2788,18 @@ bool refazer_alvos(uint32_t s, float widen);
 bool set_render_scale(uint32_t s) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     s = escala_valida((int)s);
+    vt::logf("vitart: set_render_scale(%u): escala atual %u, alvos %zu, dispositivo %d", s, scale_now(), g_targets.size(), g_dev ? 1 : 0);
     if (s == scale_now()) return true;
     if (!g_dev || g_targets.empty()) {
         g_scale_override = s;
         return true;
     }
-    if (!refazer_alvos(s, g_widen)) return false;
+    if (!refazer_alvos(s, g_widen)) {
+        vt::logf("vitart: refazer_alvos(%u) FALHOU, a escala continua %u", s, scale_now());
+        return false;
+    }
     g_scale_override = s;
+    vt::logf("vitart: alvos refeitos na escala %u", s);
     return true;
 }
 float aspect_widen() { return g_widen; }

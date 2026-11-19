@@ -16,7 +16,7 @@
 // Palavra de estado: 0x10000 | textura | áudio << 2 | resolução << 4 | fps << 7 | vsync << 9 | QTE automático << 10 |
 // contador de FPS << 11 | modo de exibição << 12 (sem bordas) | cheats: vida infinita << 13, magia infinita << 14, fúria
 // infinita << 15 | FPS medidos << 17 (0 com o contador desligado; o clipe do contador no HUD mostra esse número). As alternâncias têm um bit (0 Off, 1 On). Texturas e áudio: 1 Off, 2 On, 3 indisponível. Resolução: 1..4
-// (escala interna; no ini também vale a altura em pixels, 144..1632: resolution=240 é 240p, resolution=360 é 360p, para
+// (escala interna; no ini também vale a altura em pixels, 64..1632: resolution=90 é 90p, resolution=240 é 240p, resolution=360 é 360p, para
 // GPU fraca; no menu aparece como 1). FPS: 1 = 30, 2 = 60, 3 = máximo. As escolhas ficam em <dados>/vitart_options.ini.
 #include "vitart.h"
 #ifdef __ANDROID__
@@ -186,7 +186,7 @@ void load() {
             unsigned v = 0;
             if (sscanf(line, "hd_textures=%u", &v) == 1) g_opt.tex = v != 0;
             if (sscanf(line, "ps2_audio=%u", &v) == 1) g_opt.audio = v != 0;
-            if (sscanf(line, "resolution=%u", &v) == 1) g_opt.scale = v <= 4 ? v : (v >= 144 && v <= 1632) ? v : 0; // 240 / 240p = altura interna
+            if (sscanf(line, "resolution=%u", &v) == 1) g_opt.scale = v <= 4 ? v : (v >= 64 && v <= 1632) ? v : 0; // 240 / 240p = altura interna
             if (sscanf(line, "fps=%u", &v) == 1) g_opt.fps = v == 60 ? 2 : v > 60 ? 3 : 1;
             if (!strncmp(line, "fps=max", 7)) g_opt.fps = 3;
             if (sscanf(line, "fps_counter=%u", &v) == 1) g_opt.counter = v != 0;
@@ -210,12 +210,12 @@ void load() {
     save(); // grava o caminho da ISO quando ele veio do iniciador
 }
 
-// o código de escala em uso: 1..8 (multiplicador) ou, a partir de 144, a altura interna em pixels (resolution=240)
+// o código de escala em uso: 1..8 (multiplicador) ou, a partir de 64, a altura interna em pixels (resolution=240)
 uint32_t real_scale() { return g_opt.scale ? g_opt.scale : gvk::auto_render_scale(); }
 // o que o menu mostra (1..4): a altura fracionária (abaixo do nativo) aparece como 1
 uint32_t cur_scale() {
     const uint32_t s = real_scale();
-    return s >= 144 || s < 1 ? 1 : s > 4 ? 4 : s;
+    return s >= 64 || s < 1 ? 1 : s > 4 ? 4 : s;
 }
 
 uint32_t encode() {
@@ -468,7 +468,7 @@ void game_options_init() {
     ps2audio_set_enabled(g_opt.audio);
     if (g_opt.scale) gvk::set_render_scale(g_opt.scale);
     logf("vitart: escala pedida %u (o backend diz %u agora)", g_opt.scale, gvk::render_scale());
-    if (g_opt.scale >= 144) logf("vitart: resolução interna %up (alvo de tela %ux%u)", g_opt.scale, (720u * g_opt.scale + 204u) / 408u, g_opt.scale);
+    if (g_opt.scale >= 64) logf("vitart: resolução interna %up (alvo de tela %ux%u)", g_opt.scale, (720u * g_opt.scale + 204u) / 408u, g_opt.scale);
     gvk::set_fps_counter(g_opt.counter && !opt_profile()); // nos dois GoW o contador é o do HUD (FLP)
     gvk::set_borderless(g_opt.borderless);
 }

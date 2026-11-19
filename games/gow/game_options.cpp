@@ -467,6 +467,7 @@ void game_options_init() {
     texpack_set_enabled(g_opt.tex);
     ps2audio_set_enabled(g_opt.audio);
     if (g_opt.scale) gvk::set_render_scale(g_opt.scale);
+    logf("vitart: escala pedida %u (o backend diz %u agora)", g_opt.scale, gvk::render_scale());
     if (g_opt.scale >= 144) logf("vitart: resolução interna %up (alvo de tela %ux%u)", g_opt.scale, (720u * g_opt.scale + 204u) / 408u, g_opt.scale);
     gvk::set_fps_counter(g_opt.counter && !opt_profile()); // nos dois GoW o contador é o do HUD (FLP)
     gvk::set_borderless(g_opt.borderless);

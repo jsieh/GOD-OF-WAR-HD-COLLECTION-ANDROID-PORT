@@ -102,10 +102,10 @@ Stats g_stats;
 //
 // Códigos de escala (os mesmos do `resolution=` do ini e de set_render_scale):
 //   1..8        multiplicador inteiro da resolução do guest (1 = 720x408 nos alvos de tela)
-//   144..1632   altura interna em pixels (240 = 240p, 360 = 360p...): escala = código / 408, uma fração. Abaixo do
+//   64..1632    altura interna em pixels (90 = 90p, 240 = 240p, 360 = 360p...): escala = código / 408, uma fração. Abaixo do
 //               nativo serve para GPU fraca (PowerVR GE8320 do Helio P35...).
 constexpr uint32_t kAlturaGuest = 408;
-constexpr uint32_t kAlturaMin = 144, kAlturaMax = 1632;
+constexpr uint32_t kAlturaMin = 64, kAlturaMax = 1632;
 uint32_t escala_valida(int v) {
     if (v >= (int)kAlturaMin) return (uint32_t)(v > (int)kAlturaMax ? kAlturaMax : v);
     return (uint32_t)(v < 1 ? 1 : v > 8 ? 8 : v);

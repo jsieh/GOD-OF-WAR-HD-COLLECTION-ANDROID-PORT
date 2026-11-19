@@ -164,10 +164,19 @@ uint64_t now_ns() {
 #endif
     return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+// Timing every upload/draw adds clock reads to the CPU hot path. Enable detailed CPU
+// timers only when explicitly profiling; GPU timestamp queries remain independent.
+const bool g_vk_cpu_profile = std::getenv("VITART_VK_PROFILE") != nullptr;
 struct Timer {
-    uint64_t &acc, t0 = now_ns();
-    explicit Timer(uint64_t &a) : acc(a) {}
-    ~Timer() { acc += now_ns() - t0; }
+    uint64_t &acc;
+    uint64_t t0 = 0;
+    bool active = false;
+    explicit Timer(uint64_t &a) : acc(a), active(g_vk_cpu_profile) {
+        if (active) t0 = now_ns();
+    }
+    ~Timer() {
+        if (active) acc += now_ns() - t0;
+    }
 };
 
 constexpr const char *kPcacheFile = "vk_pipeline_cache.bin";

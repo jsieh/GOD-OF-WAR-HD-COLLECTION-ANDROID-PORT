@@ -1,50 +1,95 @@
-name: Build libvitart.so (arm64)
+name: Build Android Vulkan runtime (arm64)
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
+    paths:
+      - 'runtime/vkshim/**'
+      - 'runtime/vitart/gxm_vk.*'
+      - 'runtime/vitart/gxm_api.inc'
+      - 'runtime/vitart/gxm_backend.cpp'
+      - 'scripts/build-android-runtime.sh'
+      - 'scripts/build-android-vkshim.sh'
+      - 'third_party/adrenotools/**'
+      - '.github/workflows/build-android.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-vulkan-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   runtime:
+    name: Compile Vulkan runtime and loader shim
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       NDK_ZIP: android-ndk-r29-linux.zip
-    steps:
-      - uses: actions/checkout@v4
+      OPT: -O2
 
-      - name: Cache do NDK
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cache Android NDK r29
         id: ndk-cache
         uses: actions/cache@v4
         with:
           path: ~/ndk
-          key: android-ndk-r29-linux
+          key: android-ndk-r29-linux-v1
 
-      - name: Baixar o NDK r29
+      - name: Download Android NDK r29
         if: steps.ndk-cache.outputs.cache-hit != 'true'
+        shell: bash
         run: |
-          mkdir -p ~/ndk
+          set -euo pipefail
+          mkdir -p "$HOME/ndk"
           curl -fL --retry 3 -o "/tmp/$NDK_ZIP" "https://dl.google.com/android/repository/$NDK_ZIP"
-          unzip -q "/tmp/$NDK_ZIP" -d ~/ndk
-          ls ~/ndk
+          unzip -q "/tmp/$NDK_ZIP" -d "$HOME/ndk"
+          test -d "$HOME/ndk/android-ndk-r29"
 
-      - name: Ajustar o script para Linux (ndk-build.cmd só existe no Windows)
-        run: sed -i 's#ndk-build\.cmd#ndk-build#' scripts/build-android-runtime.sh
-
-      - name: Compilar o runtime
+      - name: Configure NDK environment
+        shell: bash
         run: |
-          export ANDROID_NDK="$HOME/ndk/android-ndk-r29"
-          [ -d "$ANDROID_NDK" ] || { echo "NDK não encontrado em $ANDROID_NDK"; ls ~/ndk; exit 1; }
-          JOBS="$(nproc)" bash scripts/build-android-runtime.sh
-          OUT=build/lib/libvitart.so
-          [ -s "$OUT" ] || { echo "libvitart.so não foi gerado"; exit 1; }
-          [ "$(od -An -tx1 -j18 -N2 "$OUT" | tr -d ' \n')" = "b700" ] || { echo "libvitart.so não é aarch64"; exit 1; }
-          ls -l "$OUT"
+          echo "ANDROID_NDK=$HOME/ndk/android-ndk-r29" >> "$GITHUB_ENV"
+          echo "$HOME/ndk/android-ndk-r29" >> "$GITHUB_PATH"
 
-      - name: Guardar o libvitart.so
+      - name: Adapt runtime build script for Linux
+        shell: bash
+        run: sed -i 's#ndk-build\.cmd#ndk-build#g' scripts/build-android-runtime.sh
+
+      - name: Build libvitart.so
+        shell: bash
+        run: |
+          set -euo pipefail
+          JOBS="$(nproc)" REFAZ=1 bash scripts/build-android-runtime.sh
+          test -s build/lib/libvitart.so
+          readelf -h build/lib/libvitart.so | grep -E 'Class:.*ELF64|Machine:.*AArch64'
+
+      - name: Build Vulkan loader shim and driver hooks
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build-android-vkshim.sh
+          for lib in libvulkan.so libhook_impl.so libmain_hook.so libfile_redirect_hook.so libgsl_alloc_hook.so; do
+            test -s "build/lib/$lib"
+            readelf -h "build/lib/$lib" | grep -q 'Machine:.*AArch64'
+          done
+          readelf -Ws build/lib/libvulkan.so | grep -q 'vkGetInstanceProcAddr'
+
+      - name: Publish Vulkan build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: libvitart-arm64
-          path: build/lib/libvitart.so
+          name: gow-vulkan-android-arm64
           if-no-files-found: error
+          path: |
+            build/lib/libvitart.so
+            build/lib/libvulkan.so
+            build/lib/libhook_impl.so
+            build/lib/libmain_hook.so
+            build/lib/libfile_redirect_hook.so
+            build/lib/libgsl_alloc_hook.so
+            build/vkshim/nomes.txt

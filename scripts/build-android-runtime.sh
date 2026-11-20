@@ -50,6 +50,6 @@ for c in third_party/libatrac9/src/*.c; do
 done
 "$TC/clang++" $T -shared -fPIC -static-libstdc++ -o build/lib/libvitart.so "$OBJ"/*.o "$SPVL/libSPIRV-Tools-opt.a" "$SPVL/libSPIRV-Tools.a" \
   -Wl,--gc-sections -Wl,--no-undefined -Wl,-z,max-page-size=16384 -Wl,-soname,libvitart.so \
-  -lvulkan -laaudio -landroid -llog -ldl -lm
+  -lvulkan -laaudio -landroid -llog -ldl -lm -lz
 "$TC/llvm-strip" --strip-unneeded build/lib/libvitart.so
 echo "pronto: build/lib/libvitart.so ($(du -h build/lib/libvitart.so | cut -f1))"

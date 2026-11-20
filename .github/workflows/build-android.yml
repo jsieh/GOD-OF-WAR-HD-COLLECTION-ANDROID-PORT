@@ -2,11 +2,17 @@ name: Build Android Vulkan runtime (arm64)
 
 on:
   workflow_dispatch:
-    inputs:
-      apk_url:
-        description: 'URL APK dari Releases (opsional, untuk menukar libvitart.so di dalamnya)'
-        required: false
-        default: ''
+  push:
+    branches: [main]
+    paths:
+      - 'runtime/vkshim/**'
+      - 'runtime/vitart/gxm_vk.*'
+      - 'runtime/vitart/gxm_api.inc'
+      - 'runtime/vitart/gxm_backend.cpp'
+      - 'scripts/build-android-runtime.sh'
+      - 'scripts/build-android-vkshim.sh'
+      - 'third_party/adrenotools/**'
+      - '.github/workflows/build-android.yml'
 
 permissions:
   contents: read
@@ -17,7 +23,7 @@ concurrency:
 
 jobs:
   runtime:
-    name: Compile runtime and loader shim
+    name: Compile Vulkan runtime and loader shim
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -25,7 +31,8 @@ jobs:
       OPT: -O2
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Cache Android NDK r29
         id: ndk-cache
@@ -71,8 +78,9 @@ jobs:
             test -s "build/lib/$lib"
             readelf -h "build/lib/$lib" | grep -q 'Machine:.*AArch64'
           done
+          readelf -Ws build/lib/libvulkan.so | grep -q 'vkGetInstanceProcAddr'
 
-      - name: Publish build artifacts
+      - name: Publish Vulkan build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: gow-vulkan-android-arm64
@@ -85,32 +93,3 @@ jobs:
             build/lib/libfile_redirect_hook.so
             build/lib/libgsl_alloc_hook.so
             build/vkshim/nomes.txt
-
-      # Opcional: menukar libvitart.so dentro de um APK que sudah ada
-      - name: Repack APK dengan libvitart.so baru
-        if: ${{ inputs.apk_url != '' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fL --retry 3 -o orig.apk "${{ inputs.apk_url }}"
-          rm -rf apkx && mkdir apkx && unzip -q orig.apk -d apkx
-          ls apkx/lib/arm64-v8a/ | tee /tmp/libs.txt
-          test -f apkx/lib/arm64-v8a/libvitart.so
-          cp build/lib/libvitart.so apkx/lib/arm64-v8a/libvitart.so
-          rm -rf apkx/META-INF
-          (cd apkx && zip -qr -X ../unsigned.apk '[Content_Types].xml' . -x '[Content_Types].xml' 2>/dev/null || zip -qr -X ../unsigned.apk .)
-          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
-          "$BT/zipalign" -f -P 16 4 unsigned.apk aligned.apk || "$BT/zipalign" -f -p 4 unsigned.apk aligned.apk
-          keytool -genkeypair -keystore debug.jks -storepass android -keypass android \
-            -alias key -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=texmod"
-          "$BT/apksigner" sign --ks debug.jks --ks-pass pass:android --key-pass pass:android \
-            --out gow-texmod.apk aligned.apk
-          "$BT/apksigner" verify gow-texmod.apk
-
-      - name: Publish repacked APK
-        if: ${{ inputs.apk_url != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: gow-texmod-apk
-          if-no-files-found: error
-          path: gow-texmod.apk

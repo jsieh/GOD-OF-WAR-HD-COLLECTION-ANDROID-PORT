@@ -126,3 +126,6 @@ void high_res_timer();
 std::string data_path(); // raiz para ux0:data e afins
 
 } // namespace vt
+namespace vt {
+void pin_fast_cores();
+}

@@ -58,6 +58,7 @@ std::mutex m_sombra;
 std::unordered_set<uint32_t> alvos, profundidades;
 
 void rodar() {
+    vt::pin_fast_cores(); // thread de gravação do Vulkan nos núcleos rápidos (ver vitart.h)
     for (;;) {
         std::function<void()> f;
         {

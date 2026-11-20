@@ -12,6 +12,7 @@
 #include <dlfcn.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <sched.h>
 #endif
 #ifdef __ANDROID__
 #include <android/log.h>
@@ -828,8 +829,49 @@ static void prof_start() {
 
 #endif
 
+// Fixa a thread chamadora nos núcleos mais rápidos. Vale em SoCs com dois grupos de frequência (Helio P35: 4 x 2,3 GHz +
+// 4 x 1,8 GHz), onde o escalonador do Android às vezes deixa o jogo nos núcleos lentos. Só age se o grupo rápido tem 2 ou
+// mais núcleos e não é o chip inteiro (SoC com todos os núcleos iguais fica como está). cpu_pin=0 no vitart_options.ini ou
+// VITART_NOPIN no ambiente desliga.
+void pin_fast_cores() {
+#ifdef __ANDROID__
+    static const uint64_t mask = []() -> uint64_t {
+        if (getenv("VITART_NOPIN") || !ini_flag("cpu_pin", true)) return 0;
+        long freq[64];
+        int n = 0;
+        long mx = 0;
+        for (; n < 64; ++n) {
+            char p[96];
+            snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", n);
+            FILE *f = fopen(p, "r");
+            if (!f) break;
+            long v = 0;
+            if (fscanf(f, "%ld", &v) != 1) v = 0;
+            fclose(f);
+            freq[n] = v;
+            if (v > mx) mx = v;
+        }
+        if (n < 4 || mx <= 0) return 0;
+        uint64_t m = 0;
+        int fast = 0;
+        for (int i = 0; i < n; ++i)
+            if (freq[i] * 10 >= mx * 9) m |= 1ull << i, ++fast;
+        if (fast < 2 || fast >= n) return 0;
+        logf("vitart: threads do jogo fixadas nos %d núcleos mais rápidos (de %d, máscara 0x%llx)", fast, n, (unsigned long long)m);
+        return m;
+    }();
+    if (!mask) return;
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    for (int i = 0; i < 64; ++i)
+        if (mask >> i & 1) CPU_SET(i, &set);
+    sched_setaffinity(0, sizeof set, &set); // 0 = a thread que chama
+#endif
+}
+
 static void thread_main(Thread *t, uint32_t arglen, uint32_t argp) {
     t_current = t;
+    pin_fast_cores();
     prof_register(t);
     t->state = 1;
     arc_ctx *ctx = &t->ctx;

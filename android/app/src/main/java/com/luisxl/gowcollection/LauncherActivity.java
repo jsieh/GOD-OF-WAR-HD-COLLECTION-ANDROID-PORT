@@ -1206,7 +1206,7 @@ public final class LauncherActivity extends Activity {
                 c.drawText("!", ar.left + 14 * dp, ar.centerY() + at.getTextSize() * 0.36f, ai);
                 c.drawText(cortar(av, at, ar.width() - 40 * dp), ar.left + 28 * dp, ar.centerY() + at.getTextSize() * 0.36f, at);
             }
-            int n = Opcoes.PROPORCOES.length + 1; // + a linha das texturas HD
+            int n = Opcoes.PROPORCOES.length + 3; // + texturas HD, dump de texturas e texturas personalizadas
             float y0 = y + 112 * dp, alt = 56 * dp, largura = Math.min(w - 2 * gx, 720 * dp);
             int vis = Math.max(2, (int) ((h - y0 - 72 * dp) / alt));
             int topoA = Math.max(0, Math.min(escolhido - vis + 1, n - vis));
@@ -1226,7 +1226,7 @@ public final class LauncherActivity extends Activity {
                     c.drawRoundRect(new RectF(r.left, r.top + 10 * dp, r.left + 3 * dp, r.bottom - 10 * dp), 2 * dp, 2 * dp, f);
                 }
                 String nome, det, selo = null;
-                if (i == n - 1) { // texturas HD: instalar depois ou apagar
+                if (i == Opcoes.PROPORCOES.length) { // texturas HD: instalar depois ou apagar
                     boolean tem = texturasInstaladas();
                     nome = Tr.t("Texturas HD");
                     if (etapaTex != null) det = etapaTex + (totalTex > 0 ? "  " + Math.round(feitoTex * 100.0 / totalTex) + "%" : "");
@@ -1234,6 +1234,18 @@ public final class LauncherActivity extends Activity {
                     else if (confirmarTex) det = Tr.t("Toque de novo para apagar as texturas HD (1,7 GB)");
                     else det = tem ? Tr.t("Instaladas: toque para apagar e liberar 1,7 GB") : Tr.t("Não instaladas: toque para baixar e instalar (+1,7 GB)");
                     if (tem && etapaTex == null) selo = Tr.t("Em uso");
+                } else if (i == Opcoes.PROPORCOES.length + 1) { // dump de texturas (texdump= no vitart_options.ini)
+                    boolean lig = texOpcao("texdump", false);
+                    nome = Tr.t("Dump de texturas");
+                    det = lig ? Tr.t("Salva as texturas do jogo em PNG em data/texdump (vale na próxima abertura)")
+                            : Tr.t("Desligado: toque para salvar as texturas do jogo em PNG (data/texdump)");
+                    if (lig) selo = Tr.t("Ligado");
+                } else if (i == Opcoes.PROPORCOES.length + 2) { // texturas do jogador (texreplace= no vitart_options.ini)
+                    boolean lig = texOpcao("texreplace", true);
+                    nome = Tr.t("Texturas personalizadas");
+                    det = lig ? Tr.t("Troca as texturas pelos PNGs de data/texreplace (nome igual ao do dump; vale na próxima abertura)")
+                            : Tr.t("Desligado: a pasta data/texreplace é ignorada");
+                    if (lig) selo = Tr.t("Ligado");
                 } else {
                     Object[] o = Opcoes.PROPORCOES[i];
                     float a = (float) o[2];
@@ -1314,8 +1326,25 @@ public final class LauncherActivity extends Activity {
             invalidate();
         }
 
+        // opção ligada/desligada do vitart_options.ini (texdump= e texreplace=; o runtime lê ao abrir o jogo)
+        private boolean texOpcao(String chave, boolean padrao) {
+            String v = Opcoes.ler(raiz, chave, padrao ? "1" : "0");
+            return !"0".equals(v);
+        }
+
+        private void alternarTexOpcao(String chave, boolean padrao) {
+            confirmarTex = false;
+            boolean nova = !texOpcao(chave, padrao);
+            Opcoes.gravar(raiz, chave, nova ? "1" : "0");
+            Toast.makeText(act, Tr.t(chave.equals("texdump") ? "Dump de texturas" : "Texturas personalizadas") + ": "
+                    + (nova ? Tr.t("Ligado") : "—") + Tr.t(" (vale na próxima abertura do jogo)"), Toast.LENGTH_SHORT).show();
+            invalidate();
+        }
+
         private void escolherProporcao() {
             if (escolhido == Opcoes.PROPORCOES.length) { acaoTexturas(); return; }
+            if (escolhido == Opcoes.PROPORCOES.length + 1) { alternarTexOpcao("texdump", false); return; }
+            if (escolhido == Opcoes.PROPORCOES.length + 2) { alternarTexOpcao("texreplace", true); return; }
             confirmarTex = false;
             {
                 Opcoes.gravar(raiz, "aspect", (String) Opcoes.PROPORCOES[escolhido][0]);
@@ -2500,7 +2529,7 @@ public final class LauncherActivity extends Activity {
                 }
             }
             if (telaOp) {
-                int n = Opcoes.PROPORCOES.length + 1;
+                int n = Opcoes.PROPORCOES.length + 3;
                 switch (k) {
                     case KeyEvent.KEYCODE_DPAD_UP: escolhido = (escolhido + n - 1) % n; invalidate(); return true;
                     case KeyEvent.KEYCODE_DPAD_DOWN: escolhido = (escolhido + 1) % n; invalidate(); return true;

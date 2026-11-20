@@ -17,7 +17,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <cerrno>
 #include <iterator>
@@ -33,7 +35,9 @@
 #include <thread>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #ifdef __ANDROID__
+#include <zlib.h> // PNG do texdump comprimido (zlib do NDK, -lz)
 #include <fcntl.h>
 #include <unistd.h>
 #include "spirv-tools/libspirv.hpp"
@@ -310,6 +314,13 @@ constexpr uint64_t kFontKey = 0xdd387c3eceaf6c63ull;
 // textura do Vita; valor = PNG em HD. Os PNGs decodificados passam de ~1,5 GB -> os parados há mais de
 // 10 s saem da memória (recarregam se voltarem à cena).
 static std::unordered_map<uint64_t, std::string> g_texpack;
+// Texturas do jogador (<dados>/texreplace/[<jogo>/]*.png): o PNG tem o nome que o texdump deu (<chave>_<l>x<a>_<hash>.png),
+// então trocar uma textura é editar o PNG do dump e copiá-lo para a pasta, sem index.tsv. Chave daqui = texuser_key():
+// (chave do pack, hash do conteúdo); sem o hash no nome (<chave>.png ou <chave>_<l>x<a>.png) vale para toda textura com
+// aquela chave. g_texuser_base guarda só as chaves do pack, para não calcular o hash de conteúdo das outras texturas.
+static std::unordered_map<uint64_t, std::string> g_texuser;
+static std::unordered_set<uint64_t> g_texuser_base;
+static uint64_t texuser_key(uint64_t key, uint32_t full32) { return (key * 0x9E3779B97F4A7C15ull) ^ (0x7465787265706C61ull + full32); }
 static uint64_t g_texpack_bytes = 0;
 // Opção "HD Textures" do menu de pausa: desligada, as texturas voltam às do Vita (o cache é refeito).
 static std::atomic<bool> g_texpack_on{true}, g_texcache_flush{false};
@@ -333,6 +344,8 @@ static bool g_icon_atlas[4] = {}; // modo de ícones (0 PS5, 1 teclado, 2 Xbox, 
 bool icon_atlas_available(int mode) { return mode >= 0 && mode < 4 && g_icon_atlas[mode]; }
 static void texpack_load();
 static const std::string &tp_path(uint64_t key) {
+    auto ut = g_texuser.find(key);
+    if (ut != g_texuser.end()) return ut->second;
     auto it = g_texkbm.find(key);
     if (it != g_texkbm.end()) return it->second;
     // só leitura (sem o operator[], que inseria): também é chamada da thread do pack
@@ -386,6 +399,31 @@ static void texpack_load() {
             if (g_texpack.emplace(std::strtoull(line.substr(0, tab).c_str(), nullptr, 16), (dir.path() / "texpack" / line.substr(tab + 1)).string()).second) n++;
         }
         if (n) logf("vitart: pack de texturas do mod %s: %zu texturas", dir.path().filename().string().c_str(), n);
+    }
+    // texturas do jogador: <dados>/texreplace (todos os jogos) e <dados>/texreplace/<jogo>, por cima de qualquer pack
+    if (!getenv("VITART_NO_TEXPACK") && ini_flag("texreplace", true)) {
+        const std::filesystem::path uroot = std::filesystem::path(data_path()) / "texreplace";
+        std::filesystem::create_directories(uroot / want, ec); // a pasta já existe para o jogador achar onde colocar
+        size_t n = 0;
+        for (const std::filesystem::path &base : {uroot, uroot / want}) {
+            for (auto &ent : std::filesystem::recursive_directory_iterator(base, ec)) {
+                if (!ent.is_regular_file(ec)) continue;
+                std::string ext = ent.path().extension().string();
+                for (char &ch : ext) ch = (char)std::tolower((unsigned char)ch);
+                const std::string stem = ent.path().stem().string();
+                if (ext != ".png" || stem.size() < 16) continue;
+                bool hex = true;
+                for (int i = 0; i < 16; i++) hex &= std::isxdigit((unsigned char)stem[i]) != 0;
+                if (!hex) continue;
+                const uint64_t key = std::strtoull(stem.substr(0, 16).c_str(), nullptr, 16);
+                uint32_t w = 0, h = 0, hh = 0, full32 = 0;
+                if (stem.size() > 17 && stem[16] == '_' && std::sscanf(stem.c_str() + 17, "%ux%u_%x", &w, &h, &hh) == 3) full32 = hh;
+                g_texuser[texuser_key(key, full32)] = ent.path().string();
+                g_texuser_base.insert(key);
+                n++;
+            }
+        }
+        if (n) logf("vitart: texturas do jogador (texreplace): %zu PNGs", n);
     }
     // VITART_TEXKBM_DIR / VITART_TEXXBOX_DIR (testes): outra pasta de ícones, sem mexer na instalada
     for (const auto &[env, sub, salt, what, mode] : {std::tuple{"VITART_TEXKBM_DIR", "texpack_kbm", kKbmSalt, "teclado e mouse", 1},
@@ -474,16 +512,25 @@ static uint64_t texkbm_key(const gxmtex::Info &info, size_t base_bytes, uint64_t
 }
 static uint64_t texpack_key(const gxmtex::Info &info, size_t base_bytes) {
     texpack_load();
-    if (g_texpack.empty() || !base_bytes || !g_texpack_on) return 0;
+    if (!base_bytes || (g_texpack.empty() && g_texuser.empty())) return 0;
     const uint32_t wh[2] = {info.width, info.height};
     const uint64_t key = fnv64(ptr<uint8_t>(info.data), std::min<size_t>(4096, base_bytes),
                                fnv64(reinterpret_cast<const uint8_t *>(wh), 8));
     // Com paleta (P8), a chave inclui a paleta inteira: variantes de cor da mesma imagem são texturas
     // diferentes (tools/texpack_match.py). Índices antigos, sem a paleta, continuam valendo.
-    if (info.base == 0x95000000u && info.palette) {
-        const uint64_t kp = fnv64(ptr<uint8_t>(info.palette), 1024, key);
-        if (g_texpack.count(kp)) return g_texpack_rejected.count(kp) ? 0 : kp;
+    const uint64_t kp = info.base == 0x95000000u && info.palette ? fnv64(ptr<uint8_t>(info.palette), 1024, key) : 0;
+    // texreplace (texturas do jogador): vale com "HD Textures" ligado ou não. Mesmo nome do texdump: hash do conteúdo
+    // inteiro primeiro (variante exata), depois o arquivo sem hash (qualquer textura com a chave)
+    if (!g_texuser.empty()) {
+        const uint64_t base = kp ? kp : key;
+        if (g_texuser_base.count(base)) {
+            const uint64_t full = fnv64(ptr<uint8_t>(info.data), base_bytes, base);
+            for (uint64_t u : {texuser_key(base, (uint32_t)full), texuser_key(base, 0)})
+                if (g_texuser.count(u)) return g_texpack_rejected.count(u) ? 0 : u;
+        }
     }
+    if (g_texpack.empty() || !g_texpack_on) return 0;
+    if (kp && g_texpack.count(kp)) return g_texpack_rejected.count(kp) ? 0 : kp;
     return g_texpack.count(key) && !g_texpack_rejected.count(key) ? key : 0;
 }
 // VITART_TEXDUMP=dir (diagnóstico): cada textura (até 2048x2048) decodificada pela primeira vez vai para
@@ -501,18 +548,29 @@ static void write_png(const std::string &path, const uint8_t *rgba, uint32_t w, 
     std::vector<uint8_t> raw; // cada linha com o filtro 0 na frente
     raw.reserve((size_t)(w * 4 + 1) * h);
     for (uint32_t y = 0; y < h; y++) raw.push_back(0), raw.insert(raw.end(), rgba + (size_t)y * w * 4, rgba + (size_t)(y + 1) * w * 4);
-    std::vector<uint8_t> z = {0x78, 0x01};
-    uint32_t a = 1, b = 0;
-    for (size_t o = 0; o < raw.size() || o == 0;) {
-        const size_t n = std::min<size_t>(65535, raw.size() - o);
-        z.push_back(o + n == raw.size() ? 1 : 0);
-        z.push_back(n & 255), z.push_back(n >> 8), z.push_back(~n & 255), z.push_back((~n >> 8) & 255);
-        z.insert(z.end(), raw.begin() + o, raw.begin() + o + n);
-        o += n;
-        if (!n) break;
+    std::vector<uint8_t> z;
+#ifdef __ANDROID__
+    { // zlib do NDK: o PNG "stored" ocupa 4x mais, e um dump do jogo inteiro enche o celular
+        uLongf zl = compressBound((uLong)raw.size());
+        z.resize(zl);
+        if (compress2(z.data(), &zl, raw.data(), (uLong)raw.size(), 1) == Z_OK) z.resize(zl);
+        else z.clear();
     }
-    for (uint8_t c : raw) a = (a + c) % 65521, b = (b + a) % 65521;
-    for (int s = 24; s >= 0; s -= 8) z.push_back(((b << 16 | a) >> s) & 255);
+#endif
+    if (z.empty()) {
+        z = {0x78, 0x01};
+        uint32_t a = 1, b = 0;
+        for (size_t o = 0; o < raw.size() || o == 0;) {
+            const size_t n = std::min<size_t>(65535, raw.size() - o);
+            z.push_back(o + n == raw.size() ? 1 : 0);
+            z.push_back(n & 255), z.push_back(n >> 8), z.push_back(~n & 255), z.push_back((~n >> 8) & 255);
+            z.insert(z.end(), raw.begin() + o, raw.begin() + o + n);
+            o += n;
+            if (!n) break;
+        }
+        for (uint8_t c : raw) a = (a + c) % 65521, b = (b + a) % 65521;
+        for (int s = 24; s >= 0; s -= 8) z.push_back(((b << 16 | a) >> s) & 255);
+    }
     FILE *f = std::fopen(path.c_str(), "wb");
     if (!f) return;
     auto be = [](uint32_t v) { return std::array<uint8_t, 4>{(uint8_t)(v >> 24), (uint8_t)(v >> 16), (uint8_t)(v >> 8), (uint8_t)v}; };
@@ -539,7 +597,7 @@ static void write_png(const std::string &path, const uint8_t *rgba, uint32_t w, 
 static void texdump(const gxmtex::Info &info, size_t base_bytes, const std::vector<uint8_t> &px) {
     static const char *env = getenv("VITART_TEXDUMP");
     static const bool png = !env && ini_flag("texdump", false);
-    static const std::string dir_s = env ? std::string(env) : png ? data_path() + "/texdump" : std::string();
+    static const std::string dir_s = env ? std::string(env) : png ? data_path() + "/texdump" + (game_tag() && *game_tag() ? std::string("/") + game_tag() : std::string()) : std::string();
     const char *dir = dir_s.empty() ? nullptr : dir_s.c_str();
     if (!dir || !base_bytes || info.width * info.height > 2048 * 2048 || px.size() < 4ull * info.width * info.height) return;
     const uint32_t wh[2] = {info.width, info.height};
@@ -553,6 +611,8 @@ static void texdump(const gxmtex::Info &info, size_t base_bytes, const std::vect
     char name[80];
     std::snprintf(name, sizeof name, "/%016llx_%ux%u_%08x.%s", (unsigned long long)key, info.width, info.height, (uint32_t)full,
                   png ? "png" : "rgba");
+    std::error_code ec_;
+    if (std::filesystem::exists(std::string(dir) + name, ec_)) return; // de uma sessão anterior
     if (png) {
         write_png(std::string(dir) + name, px.data(), info.width, info.height);
     } else if (FILE *f = std::fopen((std::string(dir) + name).c_str(), "wb")) {
@@ -666,6 +726,7 @@ static std::shared_ptr<std::vector<uint8_t>> texpack_take(uint64_t key, const gx
 static bool texpack_ajustar(uint64_t key, const std::vector<uint8_t> &orig, uint32_t ow_, uint32_t oh_, TexpackJob &jb) {
     struct InfoWH { uint32_t width, height; } info{ow_, oh_};
     TexpackJob *job = &jb;
+    if (g_texuser.count(key)) return true; // PNG do jogador (feito sobre o dump, alfa já na escala do Vita): entra como está
     const std::vector<float> so = texsig(orig.data(), info.width, info.height), sp = texsig(job->px->data(), job->w, job->h);
     static std::atomic<int> rejected{0};
     // O pack é feito por fãs: o PNG pode ser bem diferente da textura original e entra assim mesmo (o

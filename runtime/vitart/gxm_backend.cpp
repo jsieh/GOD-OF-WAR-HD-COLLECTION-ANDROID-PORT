@@ -1,5 +1,6 @@
 // aqui é só o porteiro: manda tudo pro Vulkan ou pro DX11 (detalhes em docs/renderizadores.md)
 #include "gxm_vk.h"
+#include "vitart.h"
 #include "trophy_banner.h"
 
 #ifdef _WIN32

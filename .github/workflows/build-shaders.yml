@@ -1,0 +1,156 @@
+name: Build shader cache (usse_build_cache)
+
+on:
+  workflow_dispatch:
+    inputs:
+      miss_path:
+        description: "Folder miss di repo, atau file .zip berisi folder miss (contoh: shader/miss atau miss.zip)"
+        required: true
+        default: "shader/miss"
+      extra_args:
+        description: "Argumen tambahan untuk alat. Kosong untuk Vulkan, isi --d3d11 untuk Direct3D 11"
+        required: false
+        default: ""
+      tool_script:
+        description: "Lokasi alat terjemahan di repo (kalau tidak ada, dicari otomatis)"
+        required: true
+        default: "tools/usse_build_cache.py"
+      tool_repo:
+        description: "Opsional: repo GitHub berisi alat (owner/nama), dipakai kalau repo-mu belum punya alatnya"
+        required: false
+        default: ""
+      tool_ref:
+        description: "Opsional: branch/tag repo alat (kosong = branch default)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      MISS_PATH: ${{ inputs.miss_path }}
+      EXTRA_ARGS: ${{ inputs.extra_args }}
+      TOOL: ${{ inputs.tool_script }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Checkout repo alat (opsional)
+        if: ${{ inputs.tool_repo != '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.tool_repo }}
+          ref: ${{ inputs.tool_ref }}
+          path: toolrepo
+
+      - name: Cek alat dan input
+        run: |
+          set -euo pipefail
+          tool="$TOOL"
+          if [ ! -f "$tool" ]; then
+            mapfile -t found < <(find . -name usse_build_cache.py -not -path './work/*' | sort)
+            if [ "${#found[@]}" -eq 1 ]; then
+              tool="${found[0]#./}"
+              echo "Alat ditemukan di: $tool"
+            elif [ "${#found[@]}" -gt 1 ]; then
+              echo "::error::Ada lebih dari satu usse_build_cache.py. Isi tool_script dengan salah satu:"
+              printf '%s\n' "${found[@]}"
+              exit 1
+            else
+              echo "::error::usse_build_cache.py tidak ditemukan. Isi tool_repo dengan repo yang memilikinya (owner/nama), atau tambahkan alatnya ke repo-mu."
+              exit 1
+            fi
+          fi
+          echo "TOOL_PATH=$tool" >> "$GITHUB_ENV"
+          if [ ! -e "$MISS_PATH" ]; then
+            echo "::error::$MISS_PATH tidak ditemukan di repo. Commit folder miss (atau zip-nya) ke repo PRIVATE dulu."
+            exit 1
+          fi
+
+      - name: Siapkan folder miss
+        run: |
+          set -euo pipefail
+          shopt -s dotglob
+          mkdir -p work/miss work/spv
+          case "$MISS_PATH" in
+            *.zip|*.ZIP) unzip -q -o "$MISS_PATH" -d work/miss ;;
+            *) cp -a "$MISS_PATH"/. work/miss/ ;;
+          esac
+          # Kalau isi zip hanya satu folder pembungkus, naikkan satu level
+          if [ "$(find work/miss -maxdepth 1 -type f | wc -l)" -eq 0 ] \
+             && [ "$(find work/miss -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ]; then
+            inner=$(find work/miss -mindepth 1 -maxdepth 1 -type d)
+            mv "$inner"/* work/miss/
+            rmdir "$inner"
+          fi
+          echo "File di miss: $(find work/miss -type f | wc -l)"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Terjemahkan shader
+        run: |
+          set -euo pipefail
+          root="$(dirname "$(dirname "$TOOL_PATH")")"
+          pip install --quiet capstone numpy pillow
+          if [ -f "$root/requirements.txt" ]; then pip install --quiet -r "$root/requirements.txt"; fi
+          export PYTHONPATH="$PWD:$PWD/$root:$PWD/$(dirname "$TOOL_PATH")${PYTHONPATH:+:$PYTHONPATH}"
+          # $EXTRA_ARGS sengaja tanpa kutip supaya terpecah jadi beberapa argumen
+          python "$TOOL_PATH" work/spv work/miss $EXTRA_ARGS 2>&1 | tee work/build.log
+
+      - name: Ringkasan
+        run: |
+          set -euo pipefail
+          in_count=$(find work/miss -type f | wc -l)
+          out_count=$(find work/spv -type f -name '*.spv' | wc -l)
+          {
+            echo "### Hasil terjemahan shader"
+            echo ""
+            echo "- Input (miss): $in_count file"
+            echo "- Output .spv: $out_count file"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Bandingkan berdasarkan nama dasar (sebelum titik pertama)
+          (cd work/miss && find . -type f -printf '%f\n' | sed 's/\..*$//' | sort -u) > work/in.txt
+          (cd work/spv && find . -type f -name '*.spv' -printf '%f\n' | sed 's/\..*$//' | sort -u) > work/out.txt
+          common=$(comm -12 work/in.txt work/out.txt | wc -l)
+          if [ "$common" -gt 0 ]; then
+            comm -23 work/in.txt work/out.txt > work/belum.txt
+            echo "- Input yang belum punya .spv: $(wc -l < work/belum.txt) (daftar di artifact shader-log)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            : > work/belum.txt
+            echo "- Nama input dan output tidak cocok, perbandingan per file dilewati." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "$out_count" -eq 0 ]; then
+            echo "::error::Tidak ada file .spv yang dihasilkan. Lihat work/build.log di artifact shader-log."
+            exit 1
+          fi
+
+      - name: Upload shader (.spv)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shader-spv
+          path: work/spv/
+          retention-days: 1
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shader-log
+          path: |
+            work/build.log
+            work/belum.txt
+          if-no-files-found: ignore
+          retention-days: 3

@@ -15,6 +15,14 @@ on:
         description: "Lokasi alat terjemahan di repo (kalau tidak ada, dicari otomatis)"
         required: true
         default: "tools/usse_build_cache.py"
+      tools_zip:
+        description: "Zip folder tools/ di repo (dibuka otomatis kalau ada)"
+        required: false
+        default: "tools.zip"
+      vitarecomp_zip:
+        description: "Zip folder vitarecomp/ di repo (dibuka otomatis kalau ada)"
+        required: false
+        default: "vitarecomp.zip"
       tool_repo:
         description: "Opsional: repo GitHub berisi alat (owner/nama), dipakai kalau repo-mu belum punya alatnya"
         required: false
@@ -35,6 +43,9 @@ jobs:
       MISS_PATH: ${{ inputs.miss_path }}
       EXTRA_ARGS: ${{ inputs.extra_args }}
       TOOL: ${{ inputs.tool_script }}
+      TOOL_REPO: ${{ inputs.tool_repo }}
+      TOOLS_ZIP: ${{ inputs.tools_zip }}
+      VITARECOMP_ZIP: ${{ inputs.vitarecomp_zip }}
 
     steps:
       - name: Checkout
@@ -50,6 +61,37 @@ jobs:
           ref: ${{ inputs.tool_ref }}
           path: toolrepo
 
+      - name: Buka tools.zip dan vitarecomp.zip (opsional)
+        run: |
+          set -euo pipefail
+          shopt -s dotglob nullglob
+          unpack() {   # $1 = file zip, $2 = folder tujuan
+            local zip="$1" name="$2" tmp src
+            if [ ! -f "$zip" ]; then
+              echo "$zip tidak ada, dilewati."
+              return 0
+            fi
+            tmp=$(mktemp -d)
+            unzip -q -o "$zip" -d "$tmp"
+            local entries=("$tmp"/*)
+            # Kalau isi zip dibungkus satu folder, pakai isi folder itu
+            if [ "${#entries[@]}" -eq 1 ] && [ -d "${entries[0]}" ]; then
+              src="${entries[0]}"
+            else
+              src="$tmp"
+            fi
+            mkdir -p "$name"
+            cp -a "$src"/. "$name"/
+            # Kalau zip membungkus folder induk (mis. vitarecomp/vitarecomp), naikkan satu level
+            if [ -d "$name/$name" ]; then
+              cp -a "$name/$name"/. "$name"/
+              rm -rf "$name/$name"
+            fi
+            echo "$zip -> $name/ ($(find "$name" -type f | wc -l) file)"
+          }
+          unpack "$TOOLS_ZIP" tools
+          unpack "$VITARECOMP_ZIP" vitarecomp
+
       - name: Cek alat dan input
         run: |
           set -euo pipefail
@@ -64,7 +106,14 @@ jobs:
               printf '%s\n' "${found[@]}"
               exit 1
             else
-              echo "::error::usse_build_cache.py tidak ditemukan. Isi tool_repo dengan repo yang memilikinya (owner/nama), atau tambahkan alatnya ke repo-mu."
+              if [ -d toolrepo ]; then
+                echo "Repo alat ($TOOL_REPO) berhasil di-clone, tapi isinya tidak punya usse_build_cache.py."
+              else
+                echo "tool_repo kosong, jadi hanya repo-mu yang dicari."
+              fi
+              echo "File yang namanya mirip (usse / build_cache / pack_shaders):"
+              find . \( -iname '*usse*' -o -iname '*build_cache*' -o -iname '*pack_shaders*' \) -not -path './.git/*' -not -path './toolrepo/.git/*' | head -30
+              echo "::error::usse_build_cache.py tidak ditemukan. Lihat daftar di atas. Kalau kosong, alatnya tidak ada di repo-mu maupun di tool_repo; tambahkan file itu (beserta folder vitarecomp/) ke repo-mu."
               exit 1
             fi
           fi
@@ -90,7 +139,9 @@ jobs:
             mv "$inner"/* work/miss/
             rmdir "$inner"
           fi
-          echo "File di miss: $(find work/miss -type f | wc -l)"
+          # Alat memakai glob *.gxp tanpa rekursi, jadi pindahkan semua .gxp ke tingkat atas
+          find work/miss -mindepth 2 -type f -iname '*.gxp' -exec mv -n {} work/miss/ \;
+          echo "File di miss: $(find work/miss -type f | wc -l) (.gxp: $(find work/miss -maxdepth 1 -type f -name '*.gxp' | wc -l))"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -103,7 +154,54 @@ jobs:
           root="$(dirname "$(dirname "$TOOL_PATH")")"
           pip install --quiet capstone numpy pillow
           if [ -f "$root/requirements.txt" ]; then pip install --quiet -r "$root/requirements.txt"; fi
-          export PYTHONPATH="$PWD:$PWD/$root:$PWD/$(dirname "$TOOL_PATH")${PYTHONPATH:+:$PYTHONPATH}"
+
+          # Tambahkan ke PYTHONPATH semua folder yang berisi modul pendamping alat (usse_*.py)
+          extra=""
+          while IFS= read -r d; do
+            extra="$extra:$PWD/${d#./}"
+          done < <(find . -name 'usse_*.py' -not -path './.git/*' -not -path './work/*' -printf '%h\n' | sort -u)
+          # ...dan folder induk dari paket vitarecomp (mis. di dalam toolrepo/)
+          while IFS= read -r d; do
+            extra="$extra:$PWD/${d#./}"
+          done < <(find . -type d -name vitarecomp -not -path './.git/*' -not -path './work/*' -printf '%h\n' | sort -u)
+          export PYTHONPATH="$PWD:$PWD/$root:$PWD/$(dirname "$TOOL_PATH")${extra}${PYTHONPATH:+:$PYTHONPATH}"
+
+          # usse_coverage.programs() hanya dipanggil untuk capture mem_*.bin; untuk .gxp lepas alat tidak memakainya.
+          # Kalau modulnya tidak ada, buat stub yang hanya error (dengan pesan jelas) kalau benar-benar dipanggil.
+          if ! python -c "import usse_coverage" 2>/dev/null; then
+            mkdir -p work/stubs
+            cat > work/stubs/usse_coverage.py <<'STUB'
+          def programs(src):
+              raise RuntimeError("usse_coverage.py tidak ada di repo (stub): capture mem_*.bin tidak didukung, pakai .gxp saja")
+          STUB
+            export PYTHONPATH="$PWD/work/stubs:$PYTHONPATH"
+            echo "::warning::usse_coverage.py tidak ditemukan; memakai stub (hanya .gxp yang didukung)."
+          fi
+          echo "PYTHONPATH=$PYTHONPATH"
+
+          # Kalau modul yang diimpor alat tidak ada, tampilkan kepala file alat supaya jelas apa yang dicari
+          if ! python - <<'PY'
+          import importlib.util, sys
+          missing = []
+          for m in ("vitarecomp.usse.decode", "vitarecomp.usse.pbr", "vitarecomp.usse.translate"):
+              try:
+                  if importlib.util.find_spec(m) is None:
+                      missing.append(m)
+              except ImportError:
+                  missing.append(m)
+          if missing:
+              print("Modul tidak ditemukan:", ", ".join(missing))
+              sys.exit(1)
+          PY
+          then
+            echo "--- 40 baris pertama $TOOL_PATH ---"
+            sed -n 1,40p "$TOOL_PATH"
+            echo "--- file usse_* dan folder vitarecomp yang ada di repo ---"
+            find . \( -name 'usse_*' -o -name vitarecomp \) -not -path './.git/*' -not -path './work/*' | head -30
+            echo "::error::Modul yang dibutuhkan alat tidak ada di repo. Salin seluruh folder tools/ dan vitarecomp/ dari sumber alat (bukan satu file saja), lalu jalankan lagi."
+            exit 1
+          fi
+
           # $EXTRA_ARGS sengaja tanpa kutip supaya terpecah jadi beberapa argumen
           python "$TOOL_PATH" work/spv work/miss $EXTRA_ARGS 2>&1 | tee work/build.log
 
